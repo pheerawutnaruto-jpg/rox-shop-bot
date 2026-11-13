@@ -1,10 +1,10 @@
 {
-  "name": "boombox-bot",
-  "version": "1.0.0",
+  "name": "boombox-bot-v2",
+  "version": "2.0.0",
   "main": "index.js",
   "dependencies": {
     "@discordjs/voice": "^0.17.0",
-    "discord.js": "^14.15.0",
+    "discord.js": "latest",
     "ffmpeg-static": "^5.2.0",
     "libsodium-wrappers": "^0.7.13"
   }
