@@ -168,7 +168,7 @@ client.on('interactionCreate', async interaction => {
 const http = require('http');
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Boombox URL Mode is Alive!');
+  res.end('Boombox URL Streaming is Alive!');
 }).listen(process.env.PORT || 3000);
 
 client.login(process.env.BOT_TOKEN);
