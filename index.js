@@ -17,7 +17,6 @@ const {
   StringSelectMenuOptionBuilder
 } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource } = require('@discordjs/voice');
-const path = require('path');
 const songs = require('./songs.json');
 
 const client = new Client({
@@ -32,11 +31,11 @@ const player = createAudioPlayer();
 let currentConnection = null;
 
 client.once('ready', async () => {
-  console.log(`📻 Boombox V2 พร้อมทำงานแล้วในชื่อ ${client.user.tag}!`);
+  console.log(`📻 Boombox V2 URL Mode พร้อมทำงานแล้วในชื่อ ${client.user.tag}!`);
 
   const command = new SlashCommandBuilder()
     .setName('boombox')
-    .setDescription('เปิดแผงควบคุม Boombox สไตล์ Components V2 สุดล้ำ!');
+    .setDescription('เปิดแผงควบคุม Boombox สไตล์ Components V2!');
 
   await client.application.commands.create(command);
 });
@@ -56,7 +55,7 @@ client.on('interactionCreate', async interaction => {
     });
 
     const headerText = new TextDisplayBuilder()
-      .setContent('## 📻 Roblox Style Boombox (Components V2)\nตู้เพลงดีไซน์ใหม่ล่าสุด เลือกเพลงได้สะดวกเหมือนสตรีมมิ่งชั้นนำ!');
+      .setContent('## 📻 Roblox Style Boombox (URL Streaming)\nตู้เพลงดีไซน์ใหม่ล่าสุด สตรีมเพลงผ่านลิงก์ตรงลื่นๆ ไม่มีสะดุด!');
 
     const divider = new SeparatorBuilder()
       .setDivider(true)
@@ -101,7 +100,7 @@ client.on('interactionCreate', async interaction => {
     );
 
     const mainContainer = new ContainerBuilder()
-      .setAccentColor(0x1DB954) // สีเขียวสไตล์ Spotify
+      .setAccentColor(0x1DB954)
       .addTextDisplayComponents(headerText)
       .addSeparatorComponents(divider)
       .addSectionComponents(sectionInfo)
@@ -115,7 +114,7 @@ client.on('interactionCreate', async interaction => {
     });
   }
 
-  // 2. เมื่อเลือกเพลงจาก Dropdown Menu
+  // 2. เมื่อเลือกเพลงจาก Dropdown Menu (ดึงจาก URL โดยตรง)
   if (interaction.isStringSelectMenu() && interaction.customId === 'v2_select_song') {
     const songId = interaction.values[0];
     const songData = songs[songId];
@@ -131,8 +130,7 @@ client.on('interactionCreate', async interaction => {
       adapterCreator: interaction.guild.voiceAdapterCreator,
     });
 
-    const filePath = path.join(__dirname, 'songs', songData.file);
-    const resource = createAudioResource(filePath);
+    const resource = createAudioResource(songData.file);
 
     player.play(resource);
     currentConnection.subscribe(player);
@@ -170,7 +168,7 @@ client.on('interactionCreate', async interaction => {
 const http = require('http');
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Boombox V2 Components is Alive!');
+  res.end('Boombox URL Mode is Alive!');
 }).listen(process.env.PORT || 3000);
 
 client.login(process.env.BOT_TOKEN);
