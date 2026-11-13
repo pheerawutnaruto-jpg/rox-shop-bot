@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 
 const {
@@ -29,27 +28,42 @@ const {
 
 const { spawn } = require('child_process');
 const ffmpegPath = require('ffmpeg-static');
+
 const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const { pipeline } = require('stream/promises');
+const { Readable, Transform } = require('stream');
+
 const songs = require('./songs.json');
 
-// ==============================
-// CONFIGURATION
-// ==============================
+// =====================================
+// CONFIG
+// =====================================
 
-const PORT = process.env.PORT || 3000;
 const TOKEN = process.env.BOT_TOKEN;
+const PORT = process.env.PORT || 3000;
+
+const MAX_FILE_SIZE = 100 * 1024 * 1024;
 
 if (!TOKEN) {
-  throw new Error('กรุณากำหนด BOT_TOKEN ในไฟล์ .env');
+  throw new Error('ไม่พบ BOT_TOKEN ในไฟล์ .env');
 }
 
 if (!ffmpegPath) {
-  throw new Error('ไม่พบ FFmpeg กรุณาตรวจสอบ ffmpeg-static');
+  throw new Error('ไม่พบ FFmpeg กรุณาติดตั้ง ffmpeg-static');
 }
 
-// ==============================
+console.log('========== BOOMBOX DEBUG ==========');
+console.log('FFmpeg:', ffmpegPath);
+console.log('Songs:', Object.keys(songs).length);
+console.log('===================================');
+
+// =====================================
 // DISCORD CLIENT
-// ==============================
+// =====================================
 
 const client = new Client({
   intents: [
@@ -58,75 +72,126 @@ const client = new Client({
   ]
 });
 
-// แยกเครื่องเล่นตามเซิร์ฟเวอร์
+// =====================================
+// GUILD AUDIO STATES
+// =====================================
+
 const guildPlayers = new Map();
 
-// ==============================
-// AUDIO SYSTEM
-// ==============================
-
 function getGuildState(guildId) {
-  let state = guildPlayers.get(guildId);
-
-  if (!state) {
-    const player = createAudioPlayer();
-
-    state = {
-      player,
-      connection: null,
-      ffmpeg: null,
-      currentSong: null
-    };
-
-    player.on('error', error => {
-      console.error(
-        `[${guildId}] Audio Player Error:`,
-        error.message
-      );
-
-      if (state.ffmpeg) {
-        state.ffmpeg.kill('SIGKILL');
-        state.ffmpeg = null;
-      }
-
-      state.currentSong = null;
-    });
-
-    player.on('stateChange', (oldState, newState) => {
-      console.log(
-        `[${guildId}] Player: ${oldState.status} -> ${newState.status}`
-      );
-    });
-
-    player.on(AudioPlayerStatus.Idle, () => {
-      console.log(`[${guildId}] เพลงจบแล้ว`);
-
-      if (state.ffmpeg) {
-        state.ffmpeg.kill('SIGKILL');
-        state.ffmpeg = null;
-      }
-
-      state.currentSong = null;
-    });
-
-    guildPlayers.set(guildId, state);
+  if (guildPlayers.has(guildId)) {
+    return guildPlayers.get(guildId);
   }
+
+  const player = createAudioPlayer();
+
+  const state = {
+    player,
+    connection: null,
+    ffmpeg: null,
+    resource: null,
+    currentSong: null,
+    playbackId: 0,
+    downloadController: null,
+    tempDir: null
+  };
+
+  player.on('stateChange', (oldState, newState) => {
+    console.log(
+      `[${guildId}] PLAYER: ${oldState.status} -> ${newState.status}`
+    );
+
+    // เพลงจบตามปกติ
+    if (
+      oldState.status !== AudioPlayerStatus.Idle &&
+      newState.status === AudioPlayerStatus.Idle
+    ) {
+      const oldResource = oldState.resource;
+      const oldPlaybackId = oldResource?.metadata?.playbackId;
+
+      // ป้องกัน Idle event ของเพลงเก่าปิดเพลงใหม่
+      if (oldPlaybackId === state.playbackId) {
+        stopFFmpeg(state);
+
+        state.resource = null;
+        state.currentSong = null;
+
+        cleanupTempFile(state);
+      }
+    }
+  });
+
+  player.on('error', error => {
+    console.error(`[${guildId}] PLAYER ERROR:`, error);
+
+    stopMusic(state);
+  });
+
+  guildPlayers.set(guildId, state);
 
   return state;
 }
 
+// =====================================
+// STOP FFMPEG
+// =====================================
+
 function stopFFmpeg(state) {
-  if (state.ffmpeg) {
-    state.ffmpeg.kill('SIGKILL');
-    state.ffmpeg = null;
+  const process = state.ffmpeg;
+
+  state.ffmpeg = null;
+
+  if (process && process.exitCode === null && !process.killed) {
+    process.kill('SIGKILL');
   }
 }
 
-function stopMusic(state) {
-  state.player.stop();
-  stopFFmpeg(state);
-  state.currentSong = null;
+// =====================================
+// CLEANUP TEMP FILE
+// =====================================
+
+async function cleanupTempFile(state) {
+  const dir = state.tempDir;
+
+  state.tempDir = null;
+
+  if (dir) {
+    await fs.promises.rm(dir, {
+      recursive: true,
+      force: true
+    }).catch(error => {
+      console.error('[CLEANUP ERROR]', error.message);
+    });
+  }
 }
+
+// =====================================
+// STOP MUSIC
+// =====================================
+
+function stopMusic(state) {
+  // เปลี่ยน ID เพื่อป้องกัน event เก่ารบกวนเพลงใหม่
+  state.playbackId++;
+
+  // ยกเลิกการดาวน์โหลดที่กำลังทำงาน
+  if (state.downloadController) {
+    state.downloadController.abort();
+    state.downloadController = null;
+  }
+
+  state.player.stop();
+
+  stopFFmpeg(state);
+
+  state.resource = null;
+  state.currentSong = null;
+
+  cleanupTempFile(state);
+}
+
+// =====================================
+// VALIDATE URL
+// =====================================
 
 function isValidSongURL(url) {
   try {
@@ -141,175 +206,427 @@ function isValidSongURL(url) {
   }
 }
 
-// ==============================
+// =====================================
+// DOWNLOAD SONG
+// =====================================
+
+async function downloadSong(url, signal) {
+  const tempDir = await fs.promises.mkdtemp(
+    path.join(os.tmpdir(), 'boombox-')
+  );
+
+  const tempFile = path.join(tempDir, 'song.mp3');
+
+  try {
+    console.log('[DOWNLOAD] Starting:', url);
+
+    const response = await fetch(url, {
+      signal,
+      redirect: 'follow'
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `ดาวน์โหลดเพลงไม่สำเร็จ HTTP ${response.status}`
+      );
+    }
+
+    if (!response.body) {
+      throw new Error('ไม่พบข้อมูลเพลงจาก URL');
+    }
+
+    // ตรวจสอบ URL หลัง redirect ด้วย
+    const finalURL = new URL(response.url);
+
+    if (
+      finalURL.protocol !== 'https:' ||
+      finalURL.hostname !== 'files.catbox.moe'
+    ) {
+      throw new Error('URL ปลายทางดาวน์โหลดไม่ถูกต้อง');
+    }
+
+    const contentLength = Number(
+      response.headers.get('content-length') || 0
+    );
+
+    if (contentLength > MAX_FILE_SIZE) {
+      throw new Error('ไฟล์เพลงมีขนาดใหญ่เกิน 100 MB');
+    }
+
+    let downloadedBytes = 0;
+
+    const sizeLimiter = new Transform({
+      transform(chunk, encoding, callback) {
+        downloadedBytes += chunk.length;
+
+        if (downloadedBytes > MAX_FILE_SIZE) {
+          callback(
+            new Error('ไฟล์เพลงมีขนาดใหญ่เกิน 100 MB')
+          );
+          return;
+        }
+
+        callback(null, chunk);
+      }
+    });
+
+    await pipeline(
+      Readable.fromWeb(response.body),
+      sizeLimiter,
+      fs.createWriteStream(tempFile),
+      { signal }
+    );
+
+    const stat = await fs.promises.stat(tempFile);
+
+    if (stat.size === 0) {
+      throw new Error('ไฟล์เพลงว่างเปล่า');
+    }
+
+    console.log(
+      '[DOWNLOAD] Completed:',
+      stat.size,
+      'bytes'
+    );
+
+    return {
+      tempDir,
+      tempFile
+    };
+
+  } catch (error) {
+    await fs.promises.rm(tempDir, {
+      recursive: true,
+      force: true
+    }).catch(() => {});
+
+    throw error;
+  }
+}
+
+// =====================================
 // PLAY SONG
-// ==============================
+// DOWNLOAD FIRST VERSION
+// =====================================
 
 async function playSong(interaction, songId) {
   const song = songs[songId];
 
   if (!song) {
-    throw new Error('ไม่พบเพลงที่เลือก');
+    throw new Error('ไม่พบเพลงใน songs.json');
   }
 
-  if (!isValidSongURL(song.file)) {
-    throw new Error('URL เพลงไม่ถูกต้อง หรือไม่ใช่ Catbox HTTPS');
+  if (!song.file || !isValidSongURL(song.file)) {
+    throw new Error('URL เพลงไม่ถูกต้อง');
   }
 
   const voiceChannel = interaction.member.voice.channel;
 
   if (!voiceChannel) {
-    throw new Error('กรุณาเข้าห้องเสียงก่อนเลือกเพลง');
+    throw new Error('กรุณาเข้าห้องเสียงก่อน');
   }
 
   const guildId = interaction.guild.id;
   const state = getGuildState(guildId);
 
-  // หยุดเพลงเก่าก่อน
+  // หยุดเพลงเก่า
   stopMusic(state);
 
-  // เชื่อมต่อห้องเสียง
-  if (
-    !state.connection ||
-    state.connection.state.status === VoiceConnectionStatus.Destroyed
-  ) {
-    state.connection = joinVoiceChannel({
-      channelId: voiceChannel.id,
-      guildId,
-      adapterCreator: interaction.guild.voiceAdapterCreator,
-      selfDeaf: true
-    });
+  const playbackId = state.playbackId;
 
-    state.connection.on('error', error => {
-      console.error(`[${guildId}] Voice Error:`, error);
-    });
-  } else if (
-    state.connection.joinConfig.channelId !== voiceChannel.id
-  ) {
-    state.connection.destroy();
-
-    state.connection = joinVoiceChannel({
-      channelId: voiceChannel.id,
-      guildId,
-      adapterCreator: interaction.guild.voiceAdapterCreator,
-      selfDeaf: true
-    });
-
-    state.connection.on('error', error => {
-      console.error(`[${guildId}] Voice Error:`, error);
-    });
-  }
-
-  await entersState(
-    state.connection,
-    VoiceConnectionStatus.Ready,
-    20_000
-  );
-
-  state.connection.subscribe(state.player);
-
-  // FFmpeg URL Streaming
-  const ffmpeg = spawn(ffmpegPath, [
-    '-hide_banner',
-    '-loglevel', 'warning',
-
-    '-reconnect', '1',
-    '-reconnect_streamed', '1',
-    '-reconnect_delay_max', '5',
-
-    '-i', song.file,
-
-    '-vn',
-    '-f', 's16le',
-    '-ar', '48000',
-    '-ac', '2',
-
-    'pipe:1'
-  ], {
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
-
-  state.ffmpeg = ffmpeg;
-  state.currentSong = song.name;
-
-  let ffmpegError = '';
-
-  ffmpeg.stderr.on('data', data => {
-    ffmpegError += data.toString();
-
-    if (ffmpegError.length > 4000) {
-      ffmpegError = ffmpegError.slice(-4000);
-    }
-  });
-
-  ffmpeg.on('error', error => {
-    console.error(`[${guildId}] FFmpeg Error:`, error);
-
-    if (state.ffmpeg === ffmpeg) {
-      state.ffmpeg = null;
-      state.currentSong = null;
-      state.player.stop();
-    }
-  });
-
-  ffmpeg.on('close', (code, signal) => {
-    console.log(
-      `[${guildId}] FFmpeg closed: code=${code}, signal=${signal}`
-    );
-
-    if (code !== 0 && code !== null) {
-      console.error('FFmpeg details:', ffmpegError);
-    }
-
-    if (state.ffmpeg === ffmpeg) {
-      state.ffmpeg = null;
-    }
-  });
-
-  // แปลง PCM เป็น Discord Audio Resource
-  const resource = createAudioResource(ffmpeg.stdout, {
-    inputType: StreamType.Raw
-  });
-
-  state.player.play(resource);
-
-  return song;
-}
-
-// ==============================
-// SLASH COMMAND
-// ==============================
-
-client.once('ready', async () => {
-  console.log('================================');
-  console.log('📻 BOOMBOX V2 ONLINE');
-  console.log(`🤖 Bot: ${client.user.tag}`);
-  console.log('================================');
-
-  const command = new SlashCommandBuilder()
-    .setName('boombox')
-    .setDescription('เปิดแผงควบคุม Boombox');
+  let downloaded = null;
 
   try {
-    await client.application.commands.create(command);
-    console.log('Slash Command Registered!');
+    // =================================
+    // DOWNLOAD SONG
+    // =================================
+
+    console.log(`[${guildId}] Downloading song...`);
+
+    const controller = new AbortController();
+
+    state.downloadController = controller;
+
+    try {
+      downloaded = await downloadSong(
+        song.file,
+        controller.signal
+      );
+
+    } finally {
+      if (state.downloadController === controller) {
+        state.downloadController = null;
+      }
+    }
+
+    // ตรวจสอบว่าเพลงยังเป็นรายการปัจจุบัน
+    if (state.playbackId !== playbackId) {
+      throw new Error('การเล่นเพลงถูกยกเลิก');
+    }
+
+    state.tempDir = downloaded.tempDir;
+
+    console.log(`[${guildId}] Download completed`);
+
+    // =================================
+    // CONNECT VOICE
+    // =================================
+
+    if (
+      !state.connection ||
+      state.connection.state.status === VoiceConnectionStatus.Destroyed
+    ) {
+      state.connection = joinVoiceChannel({
+        channelId: voiceChannel.id,
+        guildId,
+        adapterCreator: interaction.guild.voiceAdapterCreator,
+        selfDeaf: true,
+        debug: true
+      });
+
+      state.connection.on('error', error => {
+        console.error(`[${guildId}] VOICE ERROR:`, error);
+      });
+
+    } else if (
+      state.connection.joinConfig.channelId !== voiceChannel.id
+    ) {
+      state.connection.destroy();
+
+      state.connection = joinVoiceChannel({
+        channelId: voiceChannel.id,
+        guildId,
+        adapterCreator: interaction.guild.voiceAdapterCreator,
+        selfDeaf: true,
+        debug: true
+      });
+
+      state.connection.on('error', error => {
+        console.error(`[${guildId}] VOICE ERROR:`, error);
+      });
+    }
+
+    state.connection.on('stateChange', (oldState, newState) => {
+      console.log(
+        `[${guildId}] VOICE STATE: ${oldState.status} -> ${newState.status}`
+      );
+    });
+
+    state.connection.on('debug', message => {
+      console.log(`[${guildId}] VOICE DEBUG: ${message}`);
+    });
+
+    await entersState(
+      state.connection,
+      VoiceConnectionStatus.Ready,
+      20_000
+    );
+
+    if (state.playbackId !== playbackId) {
+      throw new Error('การเล่นเพลงถูกยกเลิก');
+    }
+
+    state.connection.subscribe(state.player);
+
+    // =================================
+    // START FFMPEG
+    // =================================
+
+    console.log(`[${guildId}] Starting FFmpeg...`);
+    console.log(`[${guildId}] FILE: ${downloaded.tempFile}`);
+
+    const ffmpeg = spawn(ffmpegPath, [
+      '-hide_banner',
+      '-loglevel', 'error',
+      '-nostdin',
+
+      '-i', downloaded.tempFile,
+
+      // เลือกเฉพาะเสียง ไม่เอาภาพปก
+      '-map', '0:a:0',
+      '-vn',
+
+      '-acodec', 'pcm_s16le',
+      '-f', 's16le',
+      '-ar', '48000',
+      '-ac', '2',
+
+      'pipe:1'
+
+    ], {
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    state.ffmpeg = ffmpeg;
+    state.currentSong = song.name;
+
+    let ffmpegError = '';
+
+    // =================================
+    // FFMPEG STDERR
+    // =================================
+
+    ffmpeg.stderr.on('data', data => {
+      const output = data.toString();
+
+      ffmpegError += output;
+
+      if (ffmpegError.length > 5000) {
+        ffmpegError = ffmpegError.slice(-5000);
+      }
+
+      console.error(
+        `[${guildId}] FFMPEG:`,
+        output.trim()
+      );
+    });
+
+    // =================================
+    // FFMPEG PROCESS ERROR
+    // =================================
+
+    ffmpeg.on('error', error => {
+      console.error(
+        `[${guildId}] FFMPEG SPAWN ERROR:`,
+        error
+      );
+
+      if (state.ffmpeg === ffmpeg) {
+        stopMusic(state);
+      }
+    });
+
+    // =================================
+    // FFMPEG PROCESS CLOSE
+    // =================================
+
+    ffmpeg.on('close', (code, signal) => {
+      console.log(
+        `[${guildId}] FFMPEG CLOSED`,
+        { code, signal }
+      );
+
+      const failed = code !== 0 || signal !== null;
+
+      if (failed) {
+        console.error(
+          `[${guildId}] FFMPEG DETAILS:`,
+          ffmpegError
+        );
+      }
+
+      if (state.ffmpeg === ffmpeg) {
+        state.ffmpeg = null;
+
+        if (failed && state.playbackId === playbackId) {
+          state.player.stop();
+
+          state.currentSong = null;
+          state.resource = null;
+        }
+      }
+
+      // ลบไฟล์เมื่อ FFmpeg อ่านไฟล์เสร็จ
+      if (state.tempDir === downloaded.tempDir) {
+        cleanupTempFile(state);
+      }
+    });
+
+    // =================================
+    // AUDIO RESOURCE
+    // =================================
+
+    ffmpeg.stdout.on('error', error => {
+      console.error(
+        `[${guildId}] FFMPEG STDOUT ERROR:`,
+        error
+      );
+    });
+
+    const resource = createAudioResource(ffmpeg.stdout, {
+      inputType: StreamType.Raw,
+      metadata: {
+        playbackId,
+        songName: song.name
+      }
+    });
+
+    resource.playStream.on('error', error => {
+      console.error(
+        `[${guildId}] RESOURCE STREAM ERROR:`,
+        error
+      );
+    });
+
+    state.resource = resource;
+
+    // =================================
+    // PLAY
+    // =================================
+
+    state.player.play(resource);
+
+    console.log(`[${guildId}] PLAYING: ${song.name}`);
+
+    return song;
+
   } catch (error) {
-    console.error('Command Error:', error);
+    // ห้ามหยุดเพลงใหม่ หากคำขอเก่าถูกยกเลิก
+    if (state.playbackId === playbackId) {
+      stopMusic(state);
+    }
+
+    // ลบไฟล์ที่ดาวน์โหลดแล้ว หากยังไม่ได้เป็นไฟล์ของเพลงปัจจุบัน
+    if (
+      downloaded &&
+      state.tempDir !== downloaded.tempDir
+    ) {
+      await fs.promises.rm(downloaded.tempDir, {
+        recursive: true,
+        force: true
+      }).catch(() => {});
+    }
+
+    throw error;
+  }
+}
+
+// =====================================
+// REGISTER SLASH COMMAND
+// =====================================
+
+client.once('clientReady', async () => {
+  console.log('===================================');
+  console.log('📻 BOOMBOX V2 ONLINE');
+  console.log(`🤖 BOT: ${client.user.tag}`);
+  console.log('===================================');
+
+  try {
+    const command = new SlashCommandBuilder()
+      .setName('boombox')
+      .setDescription('เปิดแผงควบคุม Boombox');
+
+    await client.application.commands.create(command);
+
+    console.log('Slash Command Registered!');
+
+  } catch (error) {
+    console.error('COMMAND REGISTER ERROR:', error);
   }
 });
 
-// ==============================
-// INTERACTIONS
-// ==============================
+// =====================================
+// INTERACTION HANDLER
+// =====================================
 
 client.on('interactionCreate', async interaction => {
   if (!interaction.guild) return;
 
   try {
 
-    // --------------------------
-    // /boombox
-    // --------------------------
+    // =================================
+    // BOOMBOX COMMAND
+    // =================================
 
     if (
       interaction.isChatInputCommand() &&
@@ -324,28 +641,28 @@ client.on('interactionCreate', async interaction => {
         });
       }
 
-      const songEntries = Object.entries(songs).slice(0, 25);
+      const entries = Object.entries(songs).slice(0, 25);
 
-      if (songEntries.length === 0) {
+      if (entries.length === 0) {
         return interaction.reply({
-          content: '⚠️ ยังไม่มีเพลงใน songs.json',
+          content: '⚠️ ไม่มีเพลงในระบบ',
           flags: MessageFlags.Ephemeral
         });
       }
-
-      const options = songEntries.map(([id, song]) => {
-        return new StringSelectMenuOptionBuilder()
-          .setLabel(song.name.slice(0, 100))
-          .setDescription(`รหัสเพลง: ${id}`)
-          .setValue(id);
-      });
 
       const selectRow = new ActionRowBuilder()
         .addComponents(
           new StringSelectMenuBuilder()
             .setCustomId('v2_select_song')
-            .setPlaceholder('🎧 เลือกเพลงจาก Boombox')
-            .addOptions(options)
+            .setPlaceholder('🎧 เลือกเพลง')
+            .addOptions(
+              entries.map(([id, song]) =>
+                new StringSelectMenuOptionBuilder()
+                  .setLabel(song.name.slice(0, 100))
+                  .setDescription(`รหัสเพลง ${id}`)
+                  .setValue(id)
+              )
+            )
         );
 
       const buttonRow = new ActionRowBuilder()
@@ -369,10 +686,10 @@ client.on('interactionCreate', async interaction => {
           new TextDisplayBuilder()
             .setContent(
               '## 📻 BOOMBOX V2\n' +
-              'ระบบเครื่องเล่นเพลง Discord\n\n' +
-              '🎵 เลือกเพลงจากรายการด้านล่าง\n' +
-              '⏯️ Pause / Resume เพื่อควบคุมเพลง\n' +
-              '⏹️ Stop เพื่อหยุดเล่นเพลง'
+              'ระบบเล่นเพลงผ่าน URL Streaming\n\n' +
+              '🎧 เลือกเพลงจากเมนูด้านล่าง\n' +
+              '⏯️ กด Pause / Resume เพื่อควบคุม\n' +
+              '⏹️ กด Stop เพื่อหยุดเพลง'
             )
         )
         .addSeparatorComponents(
@@ -389,9 +706,9 @@ client.on('interactionCreate', async interaction => {
       });
     }
 
-    // --------------------------
+    // =================================
     // SELECT SONG
-    // --------------------------
+    // =================================
 
     if (
       interaction.isStringSelectMenu() &&
@@ -401,23 +718,17 @@ client.on('interactionCreate', async interaction => {
         flags: MessageFlags.Ephemeral
       });
 
-      const songId = interaction.values[0];
-
       try {
+        const songId = interaction.values[0];
+
         const song = await playSong(interaction, songId);
 
         return interaction.editReply({
-          content: `🎶 กำลังเล่นเพลง **${song.name}**`
+          content: `🎶 กำลังเปิดเพลง **${song.name}**`
         });
 
       } catch (error) {
-        console.error('Play Song Error:', error);
-
-        const state = guildPlayers.get(interaction.guild.id);
-
-        if (state) {
-          stopMusic(state);
-        }
+        console.error('PLAY SONG ERROR:', error);
 
         return interaction.editReply({
           content: `⚠️ เล่นเพลงไม่สำเร็จ: ${error.message}`
@@ -425,9 +736,9 @@ client.on('interactionCreate', async interaction => {
       }
     }
 
-    // --------------------------
-    // BUTTONS
-    // --------------------------
+    // =================================
+    // BUTTON CONTROL
+    // =================================
 
     if (interaction.isButton()) {
       const state = guildPlayers.get(interaction.guild.id);
@@ -438,6 +749,21 @@ client.on('interactionCreate', async interaction => {
           flags: MessageFlags.Ephemeral
         });
       }
+
+      // ตรวจสอบว่าผู้ใช้อยู่ห้องเดียวกับบอท
+      const userChannel = interaction.member.voice.channelId;
+      const botChannel = state.connection?.joinConfig.channelId;
+
+      if (!userChannel || userChannel !== botChannel) {
+        return interaction.reply({
+          content: '⚠️ กรุณาอยู่ห้องเสียงเดียวกับบอท',
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
+      // =================================
+      // PAUSE / RESUME
+      // =================================
 
       if (interaction.customId === 'v2_pause') {
         const status = state.player.state.status;
@@ -466,6 +792,10 @@ client.on('interactionCreate', async interaction => {
         });
       }
 
+      // =================================
+      // STOP
+      // =================================
+
       if (interaction.customId === 'v2_stop') {
         stopMusic(state);
 
@@ -475,70 +805,74 @@ client.on('interactionCreate', async interaction => {
         }
 
         return interaction.reply({
-          content: '⏹️ หยุดเพลงและออกจากห้องเสียงแล้ว',
+          content: '⏹️ หยุดเพลงและออกจากห้องแล้ว',
           flags: MessageFlags.Ephemeral
         });
       }
     }
 
   } catch (error) {
-    console.error('Interaction Error:', error);
+    console.error('INTERACTION ERROR:', error);
 
-    const message = {
-      content: '⚠️ เกิดข้อผิดพลาดภายในระบบ Boombox'
+    const response = {
+      content: '⚠️ เกิดข้อผิดพลาดในระบบ Boombox'
     };
 
     if (interaction.deferred) {
-      await interaction.editReply(message).catch(() => {});
-    } else if (interaction.replied) {
-      // Interaction already acknowledged
-    } else {
+      await interaction.editReply(response).catch(() => {});
+    } else if (!interaction.replied) {
       await interaction.reply({
-        ...message,
+        ...response,
         flags: MessageFlags.Ephemeral
       }).catch(() => {});
     }
   }
 });
 
-// ==============================
-// HTTP KEEP ALIVE
-// ==============================
+// =====================================
+// HTTP SERVER
+// =====================================
 
-http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
   res.writeHead(200, {
     'Content-Type': 'text/plain; charset=utf-8'
   });
 
-  res.end('📻 Boombox V2 is Online!');
-}).listen(PORT, () => {
+  res.end('📻 BOOMBOX V2 IS ONLINE');
+});
+
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`HTTP Server listening on port ${PORT}`);
 });
 
-// ==============================
-// LOGIN
-// ==============================
-
-client.login(TOKEN);
-
-// ==============================
+// =====================================
 // SHUTDOWN
-// ==============================
+// =====================================
 
 async function shutdown() {
-  console.log('Shutting down Boombox...');
+  console.log('Shutting down...');
 
   for (const state of guildPlayers.values()) {
     stopMusic(state);
 
     if (state.connection) {
       state.connection.destroy();
+      state.connection = null;
     }
   }
 
+  server.close();
+
   client.destroy();
+
   process.exit(0);
 }
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);
+
+// =====================================
+// LOGIN
+// =====================================
+
+client.login(TOKEN);
