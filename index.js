@@ -31,7 +31,7 @@ const player = createAudioPlayer();
 let currentConnection = null;
 
 client.once('ready', async () => {
-  console.log(`📻 Boombox V2 URL Mode พร้อมทำงานแล้วในชื่อ ${client.user.tag}!`);
+  console.log(`📻 Boombox V2 URL Streamer พร้อมทำงานแล้วในชื่อ ${client.user.tag}!`);
 
   const command = new SlashCommandBuilder()
     .setName('boombox')
@@ -43,7 +43,6 @@ client.once('ready', async () => {
 client.on('interactionCreate', async interaction => {
   if (!interaction.guild) return;
 
-  // 1. เมื่อพิมพ์ /boombox ส่งแผง Components V2
   if (interaction.isChatInputCommand() && interaction.commandName === 'boombox') {
     const voiceChannel = interaction.member.voice.channel;
     if (!voiceChannel) {
@@ -55,7 +54,7 @@ client.on('interactionCreate', async interaction => {
     });
 
     const headerText = new TextDisplayBuilder()
-      .setContent('## 📻 Roblox Style Boombox (URL Streaming)\nตู้เพลงดีไซน์ใหม่ล่าสุด สตรีมเพลงผ่านลิงก์ตรงลื่นๆ ไม่มีสะดุด!');
+      .setContent('## 📻 Roblox Style Boombox (FFmpeg URL Stream)\nตู้เพลงดีไซน์ใหม่ล่าสุด สตรีมผ่าน FFmpeg เสียงออกแน่นอน!');
 
     const divider = new SeparatorBuilder()
       .setDivider(true)
@@ -71,7 +70,6 @@ client.on('interactionCreate', async interaction => {
           .setDescription('Boombox Icon')
       );
 
-    // สร้าง Dropdown Menu เลือกเพลงจาก songs.json อัตโนมัติ
     const selectOptions = Object.entries(songs).map(([id, info]) => 
       new StringSelectMenuOptionBuilder()
         .setLabel(info.name)
@@ -114,7 +112,6 @@ client.on('interactionCreate', async interaction => {
     });
   }
 
-  // 2. เมื่อเลือกเพลงจาก Dropdown Menu (ดึงจาก URL โดยตรง)
   if (interaction.isStringSelectMenu() && interaction.customId === 'v2_select_song') {
     const songId = interaction.values[0];
     const songData = songs[songId];
@@ -130,18 +127,26 @@ client.on('interactionCreate', async interaction => {
       adapterCreator: interaction.guild.voiceAdapterCreator,
     });
 
-    const resource = createAudioResource(songData.file);
+    try {
+      // ให้ FFmpeg จัดการดึงและสตรีมลิงก์ Catbox โดยตรง
+      const resource = createAudioResource(songData.file);
+      
+      player.play(resource);
+      currentConnection.subscribe(player);
 
-    player.play(resource);
-    currentConnection.subscribe(player);
-
-    await interaction.reply({
-      content: `🎶 กำลังเปิดเพลง: **${songData.name}** (เลือกโดย ${interaction.user})`,
-      flags: [MessageFlags.Ephemeral]
-    });
+      await interaction.reply({
+        content: `🎶 กำลังเปิดเพลง: **${songData.name}** (เลือกโดย ${interaction.user})`,
+        flags: [MessageFlags.Ephemeral]
+      });
+    } catch (error) {
+      console.error('Error playing audio:', error);
+      await interaction.reply({
+        content: '⚠️ เกิดข้อผิดพลาดในการเล่นเพลงผ่านลิงก์นี้',
+        flags: [MessageFlags.Ephemeral]
+      });
+    }
   }
 
-  // 3. เมื่อกดปุ่มควบคุม (Pause / Stop)
   if (interaction.isButton()) {
     if (interaction.customId === 'v2_pause') {
       if (player.state.status === 'playing') {
@@ -164,7 +169,6 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// ระบบกันบอทหลับบน Render
 const http = require('http');
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
