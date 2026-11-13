@@ -8,9 +8,6 @@ const {
   SectionBuilder,
   TextDisplayBuilder,
   ThumbnailBuilder,
-  MediaGalleryBuilder,
-  MediaGalleryItemBuilder,
-  FileBuilder,
   SeparatorBuilder,
   SeparatorSpacingSize,
   ActionRowBuilder,
@@ -35,7 +32,7 @@ const player = createAudioPlayer();
 let currentConnection = null;
 
 client.once('ready', async () => {
-  console.log(`📻 Boombox V2 (Spotify Style) พร้อมทำงานแล้วในชื่อ ${client.user.tag}!`);
+  console.log(`📻 Boombox V2 พร้อมทำงานแล้วในชื่อ ${client.user.tag}!`);
 
   const command = new SlashCommandBuilder()
     .setName('boombox')
@@ -54,12 +51,10 @@ client.on('interactionCreate', async interaction => {
       return interaction.reply({ content: '⚠️ คุณต้องเข้าห้องเสียง (Voice Channel) ก่อนหยิบ Boombox ออกมาครับ!', flags: [MessageFlags.Ephemeral] });
     }
 
-    // ตัวอย่างไฟล์แนบสำหรับ FileBuilder
-    const sampleFile = new AttachmentBuilder(Buffer.from('ยินดีต้อนรับสู่ระบบ Boombox V2'), {
+    const sampleFile = new AttachmentBuilder(Buffer.from('ยินดีต้อนรับสู่ตู้เพลง Boombox V2'), {
       name: 'boombox-info.txt'
     });
 
-    // Components V2 Elements
     const headerText = new TextDisplayBuilder()
       .setContent('## 📻 Roblox Style Boombox (Components V2)\nตู้เพลงดีไซน์ใหม่ล่าสุด เลือกเพลงได้สะดวกเหมือนสตรีมมิ่งชั้นนำ!');
 
@@ -77,10 +72,7 @@ client.on('interactionCreate', async interaction => {
           .setDescription('Boombox Icon')
       );
 
-    const fileComponent = new FileBuilder()
-      .setURL('attachment://boombox-info.txt');
-
-    // สร้าง Dropdown Menu เลือกเพลงจาก songs.json
+    // สร้าง Dropdown Menu เลือกเพลงจาก songs.json อัตโนมัติ
     const selectOptions = Object.entries(songs).map(([id, info]) => 
       new StringSelectMenuOptionBuilder()
         .setLabel(info.name)
@@ -108,13 +100,11 @@ client.on('interactionCreate', async interaction => {
         .setEmoji('⏹️')
     );
 
-    // รวมร่างทั้งหมดลงใน Container หลัก
     const mainContainer = new ContainerBuilder()
       .setAccentColor(0x1DB954) // สีเขียวสไตล์ Spotify
       .addTextDisplayComponents(headerText)
       .addSeparatorComponents(divider)
       .addSectionComponents(sectionInfo)
-      .addFileComponents(fileComponent)
       .addSeparatorComponents(divider)
       .addActionRowComponents(selectRow, buttonRow);
 
@@ -125,7 +115,7 @@ client.on('interactionCreate', async interaction => {
     });
   }
 
-  // 2. เมื่อเลือกเพลงจาก Dropdown Menu ใน Components V2
+  // 2. เมื่อเลือกเพลงจาก Dropdown Menu
   if (interaction.isStringSelectMenu() && interaction.customId === 'v2_select_song') {
     const songId = interaction.values[0];
     const songData = songs[songId];
