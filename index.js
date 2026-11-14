@@ -341,7 +341,17 @@ function createPanel(state) {
         .setCustomId('v2_select_song')
         .setPlaceholder('🎧 เลือกเพลงที่ต้องการ')
        .addOptions(
-  Object.entries(songs).slice(0, 25).map(([id, song]) =>
+  Object.entries(songs)
+  .sort(([, a], [, b]) => {
+    const artistCompare = (a.artist || 'ไม่ระบุศิลปิน')
+      .localeCompare(b.artist || 'ไม่ระบุศิลปิน', 'en', { sensitivity: 'base' });
+
+    if (artistCompare !== 0) return artistCompare;
+
+    return (a.name || '').localeCompare(b.name || '', 'th');
+  })
+  .slice(0, 25)
+  .map(([id, song]) =>
     new StringSelectMenuOptionBuilder()
       .setLabel(song.name.slice(0, 100))
       .setDescription((song.artist || 'ไม่ระบุศิลปิน').slice(0, 100))
