@@ -1,0 +1,11 @@
+node_modules
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Local backups
+index.js.before-*
+index.js.broken-backup
+index.js.red-neon-backup
