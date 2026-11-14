@@ -305,7 +305,7 @@ function startPanelTicker(state) {
     }
 
     refreshPanel(state);
-  }, 5000);
+  }, 1000);
 }
 
 // =====================================
